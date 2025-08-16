@@ -1,0 +1,14 @@
+# Ignore Balatro game files
+Balatro/
+
+# Keep only mod files
+!forsnakenmod.lua
+!forsnakenmod_newjokers.lua
+!assets/
+!README.md
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
