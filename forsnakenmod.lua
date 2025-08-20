@@ -210,8 +210,9 @@ SMODS.Joker{
     loc_txt = {
         name = 'Unstable Eye',
         text = {
-            "All cards are always",
-            "drawn {C:attention}face-up{}"
+            "All face down cards are",
+            "flipped {C:attention}face-up{}",
+            "each hand played"
         }
     },
     config = { extra = {} },
@@ -222,11 +223,19 @@ SMODS.Joker{
     blueprint_compat = false,
     add_to_deck = function(self, card, from_debuff)
         if not from_debuff then
-            -- Hook into card drawing to force face-up
-            local old_draw = G.FUNCS.draw_from_deck_to_hand
-            G.FUNCS.draw_from_deck_to_hand = function(self)
-                old_draw(self)
-                -- Flip all cards in hand face-up
+            -- Store the original draw function if not already stored
+            if not G.FUNCS.original_draw_from_deck_to_hand then
+                G.FUNCS.original_draw_from_deck_to_hand = G.FUNCS.draw_from_deck_to_hand
+            end
+            
+            -- Override the draw function to always draw face-up
+            G.FUNCS.draw_from_deck_to_hand = function(e)
+                -- Call original draw function
+                if G.FUNCS.original_draw_from_deck_to_hand then
+                    G.FUNCS.original_draw_from_deck_to_hand(e)
+                end
+                
+                -- Force all cards in hand to be face-up
                 if G.hand and G.hand.cards then
                     for _, c in ipairs(G.hand.cards) do
                         if c.facing == 'back' then
@@ -236,7 +245,7 @@ SMODS.Joker{
                 end
             end
             
-            -- Also flip existing cards
+            -- Flip any existing face-down cards
             if G.hand and G.hand.cards then
                 for _, c in ipairs(G.hand.cards) do
                     if c.facing == 'back' then
@@ -256,20 +265,50 @@ SMODS.Joker{
                     break
                 end
             end
-            if not has_other then
-                -- Restore original draw function only if no other Unstable Eye exists
-                -- (This is a simplified approach - in production you'd want to store the original)
+            
+            -- Only restore if no other Unstable Eye exists
+            if not has_other and G.FUNCS.original_draw_from_deck_to_hand then
+                G.FUNCS.draw_from_deck_to_hand = G.FUNCS.original_draw_from_deck_to_hand
+                G.FUNCS.original_draw_from_deck_to_hand = nil
             end
         end
     end,
     calculate = function(self, card, context)
-        -- Continuously check and flip cards face-up
-        if context.cardarea == G.hand and G.hand and G.hand.cards then
-            for _, c in ipairs(G.hand.cards) do
-                if c.facing == 'back' then
-                    c:flip()
+        -- Check multiple contexts to flip cards face-up
+        if context.before and not context.blueprint then
+            -- Before playing a hand, ensure all cards are face-up
+            if G.hand and G.hand.cards then
+                for _, c in ipairs(G.hand.cards) do
+                    if c.facing == 'back' then
+                        c:flip()
+                    end
                 end
             end
+        elseif context.after and not context.blueprint then
+            -- After drawing, ensure all cards are face-up
+            if G.hand and G.hand.cards then
+                for _, c in ipairs(G.hand.cards) do
+                    if c.facing == 'back' then
+                        c:flip()
+                    end
+                end
+            end
+        elseif context.setting_blind and not context.blueprint then
+            -- When blind is set, ensure cards are face-up
+            G.E_MANAGER:add_event(Event({
+                trigger = 'after',
+                delay = 0.1,
+                func = function()
+                    if G.hand and G.hand.cards then
+                        for _, c in ipairs(G.hand.cards) do
+                            if c.facing == 'back' then
+                                c:flip()
+                            end
+                        end
+                    end
+                    return true
+                end
+            }))
         end
     end
 }
@@ -283,8 +322,7 @@ SMODS.Joker{
         name = 'Raging Pace',
         text = {
             "All boss blinds don't have",
-            "an effect for the first",
-            "{C:attention}20 seconds{} or until",
+            "an effect until",
             "after first hand played"
         }
     },
@@ -297,47 +335,49 @@ SMODS.Joker{
     blueprint_compat = false,
     calculate = function(self, card, context)
         if context.setting_blind and G.GAME.blind and G.GAME.blind.boss and not context.blueprint then
-            -- Store original boss functions
+            -- Initialize tracking variables
             card.ability.extra.hand_played = false
             card.ability.extra.start_time = love.timer.getTime()
-            card.ability.extra.original_debuff_hand = G.GAME.blind.debuff_hand
-            card.ability.extra.original_debuff_card = G.GAME.blind.debuff_card
-            card.ability.extra.original_modify_hand = G.GAME.blind.modify_hand
+            card.ability.extra.blind_was_disabled = false
             
-            -- Disable the boss blind temporarily by replacing its functions
-            G.GAME.blind.debuff_hand = function() return nil end
-            G.GAME.blind.debuff_card = function() return nil end
-            G.GAME.blind.modify_hand = function() return nil end
-            card.ability.extra.disabled = true
-            
-            card_eval_status_text(card, 'extra', nil, nil, nil, {message = "Boss Disabled!", colour = G.C.PURPLE})
-            play_sound('timpani')
-        elseif context.cardarea == G.jokers and context.before then
-            -- First hand played
+            -- Schedule the disable to happen after a small delay (like Chicot does)
+            G.E_MANAGER:add_event(Event({func = function()
+                G.E_MANAGER:add_event(Event({func = function()
+                    if G.GAME.blind and G.GAME.blind.boss and not G.GAME.blind.disabled then
+                        -- Use the same method as Chicot
+                        G.GAME.blind:disable()
+                        card.ability.extra.blind_was_disabled = true
+                        play_sound('timpani')
+                        card_eval_status_text(card, 'extra', nil, nil, nil, {message = "Boss Disabled!", colour = G.C.PURPLE})
+                    end
+                return true end}))
+            return true end}))
+        elseif context.cardarea == G.jokers and context.before and not context.blueprint then
+            -- Mark that a hand has been played but don't re-enable yet
             if card.ability.extra and not card.ability.extra.hand_played then
                 card.ability.extra.hand_played = true
-                
-                -- Re-enable boss if it was disabled
-                if card.ability.extra.disabled and G.GAME.blind and G.GAME.blind.boss then
-                    G.GAME.blind.debuff_hand = card.ability.extra.original_debuff_hand
-                    G.GAME.blind.debuff_card = card.ability.extra.original_debuff_card
-                    G.GAME.blind.modify_hand = card.ability.extra.original_modify_hand
-                    card.ability.extra.disabled = false
+            end
+        elseif context.after and not context.blueprint then
+            -- After hand scoring is complete, re-enable if a hand was played
+            if card.ability.extra and card.ability.extra.hand_played and card.ability.extra.blind_was_disabled then
+                if G.GAME.blind and G.GAME.blind.boss and G.GAME.blind.disabled then
+                    G.GAME.blind.disabled = false
+                    G.GAME.blind:set_text() -- Update the blind's display text
+                    card.ability.extra.blind_was_disabled = false
                     
                     card_eval_status_text(card, 'extra', nil, nil, nil, {message = "Boss Re-enabled!", colour = G.C.RED})
                 end
             end
         elseif context.joker_main then
-            -- Check if 20 seconds have passed
-            if card.ability.extra and card.ability.extra.start_time and not card.ability.extra.hand_played and card.ability.extra.disabled then
+            -- Check if 20 seconds have passed (only if no hand has been played yet)
+            if card.ability.extra and card.ability.extra.start_time and not card.ability.extra.hand_played and card.ability.extra.blind_was_disabled then
                 local current_time = love.timer.getTime()
                 if current_time - card.ability.extra.start_time >= card.ability.extra.timer then
                     -- Re-enable boss
-                    if G.GAME.blind and G.GAME.blind.boss then
-                        G.GAME.blind.debuff_hand = card.ability.extra.original_debuff_hand
-                        G.GAME.blind.debuff_card = card.ability.extra.original_debuff_card
-                        G.GAME.blind.modify_hand = card.ability.extra.original_modify_hand
-                        card.ability.extra.disabled = false
+                    if G.GAME.blind and G.GAME.blind.boss and G.GAME.blind.disabled then
+                        G.GAME.blind.disabled = false
+                        G.GAME.blind:set_text() -- Update the blind's display text
+                        card.ability.extra.blind_was_disabled = false
                         card.ability.extra.hand_played = true -- Prevent re-triggering
                         
                         card_eval_status_text(card, 'extra', nil, nil, nil, {message = "Time's up!", colour = G.C.RED})
@@ -389,6 +429,10 @@ SMODS.Joker{
                     if joker.config.center.blueprint_compat == false then
                         can_blueprint = false
                     end
+                    -- Prevent copying other Pranksters to avoid stack overflow
+                    if joker.config.center.key == 'j_forsnakenmod_prankster' or joker.ability.name == 'Prankster' then
+                        can_blueprint = false
+                    end
                 end
                 if can_blueprint then
                     table.insert(other_jokers, joker)
@@ -417,7 +461,11 @@ SMODS.Joker{
             -- Pick initial joker for this blind
             local other_jokers = {}
             for _, joker in ipairs(G.jokers.cards) do
-                if joker ~= card and joker.config.center.blueprint_compat ~= false then
+                -- Prevent copying self and other Pranksters to avoid stack overflow
+                local is_prankster = joker.config and joker.config.center and 
+                    (joker.config.center.key == 'j_forsnakenmod_prankster' or 
+                     joker.ability.name == 'Prankster')
+                if joker ~= card and not is_prankster and joker.config.center.blueprint_compat ~= false then
                     table.insert(other_jokers, joker)
                 end
             end
@@ -437,7 +485,11 @@ SMODS.Joker{
             if card.ability.extra.hand_count > 1 then -- After first hand, pick new joker
                 local other_jokers = {}
                 for _, joker in ipairs(G.jokers.cards) do
-                    if joker ~= card and joker.config.center.blueprint_compat ~= false then
+                    -- Prevent copying self and other Pranksters to avoid stack overflow
+                    local is_prankster = joker.config and joker.config.center and 
+                        (joker.config.center.key == 'j_forsnakenmod_prankster' or 
+                         joker.ability.name == 'Prankster')
+                    if joker ~= card and not is_prankster and joker.config.center.blueprint_compat ~= false then
                         table.insert(other_jokers, joker)
                     end
                 end
@@ -464,6 +516,19 @@ SMODS.Joker{
             end
             
             if still_exists then
+                -- Additional safety check to prevent infinite recursion
+                local is_copying_prankster = card.ability.extra.copied_joker.config and 
+                    card.ability.extra.copied_joker.config.center and 
+                    (card.ability.extra.copied_joker.config.center.key == 'j_forsnakenmod_prankster' or
+                     card.ability.extra.copied_joker.ability.name == 'Prankster')
+                
+                if is_copying_prankster then
+                    -- Skip copying to prevent stack overflow
+                    card.ability.extra.copied_joker = nil
+                    card.ability.extra.current_copy = "None"
+                    return nil
+                end
+                
                 -- Use Blueprint's method - set context and call calculate_joker
                 context.blueprint = (context.blueprint and (context.blueprint + 1)) or 1
                 context.blueprint_card = context.blueprint_card or card
@@ -498,10 +563,11 @@ SMODS.Joker{
         text = {
             "Gains {X:mult,C:white}X0.01{} Mult for",
             "every {C:chips}666{} chips scored",
+            "at end of round",
             "{C:inactive}(Currently {X:mult,C:white}X#1#{C:inactive} Mult)"
         }
     },
-    config = { extra = { xmult = 1, chips_scored = 0 } },
+    config = { extra = { xmult = 1, chips_to_process = 0 } },
     rarity = 4,
     cost = 5,
     unlocked = true,
@@ -511,63 +577,50 @@ SMODS.Joker{
         return { vars = { card.ability.extra.xmult } }
     end,
     calculate = function(self, card, context)
+        -- During scoring, apply the multiplier
         if context.joker_main then
-            return {
-                x_mult = card.ability.extra.xmult,
-                card = card
-            }
-        end
-    end,
-    calculate = function(self, card, context)
-        if context.joker_main then
-            -- Apply the multiplier
-            return {
-                x_mult = card.ability.extra.xmult,
-                card = card
-            }
-        elseif context.after and not context.blueprint then
-            print("DEBUG Noob: after context triggered")
-            print("  G.GAME.chips = " .. tostring(G.GAME.chips))
-            print("  context.cardarea = " .. tostring(context.cardarea))
-            print("  context.scoring_hand = " .. tostring(context.scoring_hand))
-            print("  context.full_hand = " .. tostring(context.full_hand))
-            
-            -- Try multiple contexts to find where chips are available
-            if G.GAME.chips and G.GAME.chips > 0 then
-                print("DEBUG Noob: Found chips! G.GAME.chips = " .. G.GAME.chips)
+            -- Apply the multiplier if we have one
+            if card.ability.extra.xmult > 1 then
+                return {
+                    x_mult = card.ability.extra.xmult,
+                    card = card
+                }
             end
+        -- Use end_of_round like many jokers do for reliable tracking
         elseif context.end_of_round and not context.blueprint and not context.individual and not context.repetition then
-            -- Check at end of round like Two Time does
-            print("DEBUG Noob: end_of_round, G.GAME.chips = " .. tostring(G.GAME.chips))
-            
-            if G.GAME.chips and G.GAME.chips > 0 then
-                -- Track all chips scored this round
-                if not card.ability.extra.round_tracked then
-                    card.ability.extra.chips_scored = card.ability.extra.chips_scored + G.GAME.chips
-                    card.ability.extra.round_tracked = true
+            -- Check if we beat the blind and have chips to process
+            if G.GAME.chips and G.GAME.blind and G.GAME.chips > 0 then
+                print("NOOB DEBUG: end_of_round triggered")
+                print("  G.GAME.chips = " .. tostring(G.GAME.chips))
+                print("  G.GAME.blind.chips = " .. tostring(G.GAME.blind.chips))
+                
+                -- Only process if we haven't already this round
+                if not card.ability.extra.processed_this_round then
+                    local final_chips = G.GAME.chips
+                    local increments = math.floor(final_chips / 666)
                     
-                    print("DEBUG Noob: Added " .. G.GAME.chips .. " chips at end of round, total = " .. card.ability.extra.chips_scored)
+                    print("NOOB: Processing " .. final_chips .. " chips, increments = " .. increments)
                     
-                    -- Calculate mult based on total chips scored
-                    local increments = math.floor(card.ability.extra.chips_scored / 666)
-                    local new_xmult = 1 + (increments * 0.01)
-                    
-                    print("DEBUG Noob: Increments = " .. increments .. ", new_xmult = " .. new_xmult)
-                    
-                    if new_xmult > card.ability.extra.xmult then
-                        card.ability.extra.xmult = new_xmult
-                        print("DEBUG Noob: MULT INCREASED to " .. new_xmult)
+                    if increments > 0 then
+                        -- Add X0.01 mult for each 666 chips
+                        local mult_gain = increments * 0.01
+                        local old_mult = card.ability.extra.xmult
+                        card.ability.extra.xmult = card.ability.extra.xmult + mult_gain
+                        card.ability.extra.processed_this_round = true
+                        
+                        print("NOOB: GAINED MULT! " .. old_mult .. " -> " .. card.ability.extra.xmult)
+                        
                         return {
-                            message = "X" .. string.format("%.2f", card.ability.extra.xmult),
+                            message = "+" .. string.format("X%.2f", mult_gain) .. " Mult!",
                             colour = G.C.MULT
                         }
                     end
                 end
             end
         elseif context.setting_blind and not context.blueprint then
-            -- Reset tracking for new round
-            card.ability.extra.round_tracked = false
-            print("DEBUG Noob: Reset round tracking")
+            -- Reset for new round
+            card.ability.extra.processed_this_round = false
+            print("NOOB: Reset for new round")
         end
     end
 }
@@ -654,31 +707,102 @@ SMODS.Joker{
             card.ability.extra.rounds_passed = card.ability.extra.rounds_passed + 1
             
             if card.ability.extra.rounds_passed >= 2 then
-                -- Transform into Chicken Bone
-                G.E_MANAGER:add_event(Event({
-                    func = function()
-                        -- Create Chicken Bone joker
-                        local chicken_bone = create_card('Joker', G.jokers, nil, nil, nil, nil, 'j_forsnakenmod_chicken_bone')
-                        
-                        -- Make it eternal and negative
-                        chicken_bone:set_edition({negative = true}, true)
-                        chicken_bone:set_eternal(true)
-                        
-                        -- Add to deck at the same position
-                        chicken_bone:add_to_deck()
-                        G.jokers:emplace(chicken_bone)
-                        
-                        -- Remove this card
-                        card:start_dissolve()
-                        
-                        -- Show message
-                        card_eval_status_text(chicken_bone, 'extra', nil, nil, nil, 
-                            {message = "Transformed!", colour = G.C.PURPLE})
-                        
-                        play_sound('slice1')
-                        return true
-                    end
-                }))
+                -- Transform into Chicken Bone at end of round
+                if not card.ability.extra.transforming then
+                    card.ability.extra.transforming = true
+                    
+                    G.E_MANAGER:add_event(Event({
+                        trigger = 'after',
+                        delay = 0.2,
+                        func = function()
+                            -- Debug: Let's find what key SMODS actually uses
+                            print("DEBUG: Looking for Chicken Bone key in G.P_CENTERS")
+                            for k, v in pairs(G.P_CENTERS or {}) do
+                                if type(v) == "table" and v.name and (string.find(string.lower(tostring(v.name)), "chicken") or string.find(string.lower(tostring(v.name)), "bone")) then
+                                    print("  Found potential match: " .. k .. " = " .. tostring(v.name))
+                                end
+                            end
+                            
+                            -- Try different possible keys
+                            local possible_keys = {
+                                'j_forsnakenmod_chicken_bone',
+                                'j_fors_chicken_bone',
+                                'j_chicken_bone',
+                                'fors_chicken_bone',
+                                'chicken_bone'
+                            }
+                            
+                            local chicken_bone = nil
+                            for _, key in ipairs(possible_keys) do
+                                print("DEBUG: Trying key: " .. key)
+                                if G.P_CENTERS[key] then
+                                    print("  Key exists in G.P_CENTERS!")
+                                    chicken_bone = create_card('Joker', G.jokers, nil, nil, nil, nil, key)
+                                    if chicken_bone then
+                                        print("  Successfully created joker with key: " .. key)
+                                        break
+                                    end
+                                end
+                            end
+                            
+                            -- If still no success, create a random joker and modify it
+                            if not chicken_bone then
+                                print("DEBUG: Failed to create Chicken Bone, using fallback")
+                                chicken_bone = create_card('Joker', G.jokers, nil, 1, nil, nil, nil, 'chb')
+                                
+                                if chicken_bone then
+                                    -- Override it to be Chicken Bone
+                                    chicken_bone.ability = chicken_bone.ability or {}
+                                    chicken_bone.ability.name = 'Chicken Bone'
+                                    chicken_bone.ability.extra = { chips = 1 }
+                                    chicken_bone.base.name = 'Chicken Bone'
+                                    chicken_bone.base.nominal = 1
+                                    chicken_bone.base.cost = 1
+                                    chicken_bone.sell_cost = 1
+                                    
+                                    -- Set up the joker effect
+                                    chicken_bone.calculate_joker = function(self, context)
+                                        if context.joker_main then
+                                            return {
+                                                chips = 1,
+                                                card = self,
+                                                message = "+1"
+                                            }
+                                        end
+                                    end
+                                end
+                            end
+                            
+                            if chicken_bone then
+                                -- Make it eternal and negative
+                                chicken_bone:set_edition({negative = true}, true)
+                                chicken_bone:set_eternal(true)
+                                
+                                -- Add to deck
+                                chicken_bone:add_to_deck()
+                                G.jokers:emplace(chicken_bone)
+                                chicken_bone:start_materialize()
+                                
+                                -- Show transformation message
+                                attention_text({
+                                    text = "Transformed into Chicken Bone!",
+                                    scale = 1.3,
+                                    hold = 2,
+                                    backdrop_colour = G.C.PURPLE,
+                                    align = 'cm',
+                                    offset = {x = 0, y = -2},
+                                    major = G.play
+                                })
+                                
+                                play_sound('slice1')
+                            end
+                            
+                            -- Remove the Fried Chicken card
+                            card:start_dissolve()
+                            return true
+                        end
+                    }))
+                end
                 
                 return {
                     message = "Time to transform!",
@@ -710,18 +834,18 @@ SMODS.Joker{
     config = { extra = { chips = 1 } },
     rarity = 1,
     cost = 1,
-    unlocked = true,
-    discovered = true,
+    unlocked = false,  -- Prevent it from appearing normally
+    discovered = false,  -- Prevent it from appearing in collection
     blueprint_compat = true,
-    in_pool = function(self)
-        -- Cannot appear in normal pools, only from Fried Chicken
+    in_pool = function(self)  -- Override pool function to prevent shop appearance
         return false
     end,
     calculate = function(self, card, context)
         if context.joker_main then
             return {
                 chips = card.ability.extra.chips,
-                card = card
+                card = card,
+                message = "+1"
             }
         end
     end
@@ -859,6 +983,8 @@ SMODS.Joker{
                     {message = "Target: " .. localize(generator_card.base.value, 'ranks'), colour = G.C.PURPLE})
             end
         elseif context.joker_main then
+            local upgraded = false
+            
             -- Check if it's a straight
             if context.scoring_name == "Straight" or context.scoring_name == "Straight Flush" then
                 -- Check if the straight contains the target rank (exactly like Mail-In Rebate checks)
@@ -875,23 +1001,30 @@ SMODS.Joker{
                 if contains_rank then
                     -- Increase the multiplier permanently
                     card.ability.extra.xmult = card.ability.extra.xmult + 0.5
+                    upgraded = true
                     
                     card_eval_status_text(card, 'extra', nil, nil, nil,
                         {message = "Upgraded!", colour = G.C.MULT})
-                    
-                    return {
-                        message = "X" .. string.format("%.1f", card.ability.extra.xmult),
-                        colour = G.C.MULT
-                    }
                 end
             end
             
-            -- Always apply the current multiplier
+            -- Always apply the current multiplier (whether we just upgraded or not)
             if card.ability.extra.xmult > 1 then
-                return {
-                    x_mult = card.ability.extra.xmult,
-                    card = card
-                }
+                -- If we upgraded this hand, show both the upgrade and the mult application
+                if upgraded then
+                    return {
+                        x_mult = card.ability.extra.xmult,
+                        card = card,
+                        message = "X" .. string.format("%.1f", card.ability.extra.xmult),
+                        colour = G.C.MULT
+                    }
+                else
+                    -- Just apply the mult normally
+                    return {
+                        x_mult = card.ability.extra.xmult,
+                        card = card
+                    }
+                end
             end
         end
     end
@@ -935,14 +1068,31 @@ SMODS.Joker{
         if not from_debuff and card.ability.extra.rounds_passed >= 2 then
             -- Create an actual Invisible Joker using Balatro's system
             if #G.jokers.cards < G.jokers.config.card_limit then
-                local invisible_joker = create_card('Joker', G.jokers, nil, nil, nil, nil, nil, 'inv')
-                invisible_joker:add_to_deck()
-                G.jokers:emplace(invisible_joker)
-                invisible_joker:start_materialize()
-                
-                -- Show message
-                card_eval_status_text(card, 'extra', nil, nil, nil, 
-                    {message = "Ghostburger transformed!", colour = G.C.PURPLE})
+                G.E_MANAGER:add_event(Event({
+                    func = function()
+                        -- Specifically create an Invisible Joker by key
+                        local invisible_joker = create_card('Joker', G.jokers, nil, nil, nil, nil, 'j_invisible')
+                        if invisible_joker then
+                            invisible_joker:add_to_deck()
+                            G.jokers:emplace(invisible_joker)
+                            invisible_joker:start_materialize()
+                            
+                            -- Show message
+                            attention_text({
+                                text = "Invisible Joker created!",
+                                scale = 1.3,
+                                hold = 2,
+                                backdrop_colour = G.C.PURPLE,
+                                align = 'cm',
+                                offset = {x = 0, y = -2},
+                                major = G.play
+                            })
+                            
+                            play_sound('timpani')
+                        end
+                        return true
+                    end
+                }))
             end
         end
     end
@@ -1111,159 +1261,6 @@ SMODS.Joker{
     end
 }
 
-----------------------------------------------
--- Fried Chicken Joker
-----------------------------------------------
-SMODS.Joker{
-    key = 'fried_chicken',
-    loc_txt = {
-        name = 'Fried Chicken',
-        text = {
-            "{C:mult}+40{} Mult",
-            "After {C:attention}2{} rounds, destroy",
-            "this joker and create an",
-            "{C:dark_edition}eternal{} {C:dark_edition}negative{} {C:attention}Chicken Bone{}",
-            "{C:inactive}(Currently {C:attention}#1#/2{C:inactive})"
-        }
-    },
-    config = { extra = { mult = 40, rounds_passed = 0 } },
-    rarity = 2,
-    cost = 6,
-    unlocked = true,
-    discovered = true,
-    blueprint_compat = true,
-    loc_vars = function(self, info_queue, card)
-        return { vars = { card.ability.extra.rounds_passed } }
-    end,
-    calculate = function(self, card, context)
-        if context.joker_main then
-            return {
-                mult = card.ability.extra.mult,
-                card = card
-            }
-        elseif context.end_of_round and not context.blueprint and not context.individual and not context.repetition then
-            card.ability.extra.rounds_passed = card.ability.extra.rounds_passed + 1
-            
-            if card.ability.extra.rounds_passed >= 2 then
-                -- Transform into Chicken Bone
-                G.E_MANAGER:add_event(Event({
-                    func = function()
-                        -- Save position of the current card
-                        local my_pos = card.T.x
-                        
-                        -- First dissolve the Fried Chicken
-                        card:start_dissolve()
-                        
-                        -- Then create the Chicken Bone after a delay
-                        G.E_MANAGER:add_event(Event({
-                            trigger = 'after',
-                            delay = 0.4,
-                            func = function()
-                                -- Force create the Chicken Bone by manually building a joker with the right properties
-                                local chicken_bone = create_card('Joker', G.jokers, nil, nil, nil, nil, nil, 'chk')
-                                
-                                if chicken_bone then
-                                    -- Override its properties to be Chicken Bone
-                                    chicken_bone.ability.name = 'Chicken Bone'
-                                    chicken_bone.ability.extra = { chips = 1 }
-                                    chicken_bone.base.name = 'Chicken Bone'
-                                    
-                                    -- Manually set up the joker effect
-                                    local old_calc = chicken_bone.calculate_joker
-                                    chicken_bone.calculate_joker = function(self, context)
-                                        if context.joker_main then
-                                            return {
-                                                chips = 1,
-                                                card = self,
-                                                message = "+1"
-                                            }
-                                        end
-                                        if old_calc then
-                                            return old_calc(self, context)
-                                        end
-                                    end
-                                    
-                                    -- Make it eternal and negative
-                                    chicken_bone:set_edition({negative = true}, true)
-                                    chicken_bone:set_eternal(true)
-                                    
-                                    -- Add to deck
-                                    chicken_bone:add_to_deck()
-                                    G.jokers:emplace(chicken_bone)
-                                    
-                                    -- Position it where the old card was
-                                    if my_pos then
-                                        chicken_bone.T.x = my_pos
-                                    end
-                                    
-                                    -- Update the UI text
-                                    if chicken_bone.children and chicken_bone.children.center then
-                                        chicken_bone.children.center:remove()
-                                        chicken_bone.children.center = nil
-                                    end
-                                    
-                                    -- Show message
-                                    attention_text({
-                                        text = "Transformed into Chicken Bone!",
-                                        scale = 1.3,
-                                        hold = 2,
-                                        backdrop_colour = G.C.PURPLE,
-                                        align = 'cm',
-                                        offset = {x = 0, y = -2},
-                                        major = G.play
-                                    })
-                                end
-                                
-                                play_sound('slice1')
-                                return true
-                            end
-                        }))
-                        return true
-                    end
-                }))
-                
-                return {
-                    message = "Time to transform!",
-                    colour = G.C.PURPLE
-                }
-            else
-                return {
-                    message = tostring(card.ability.extra.rounds_passed) .. "/2 Rounds",
-                    colour = G.C.MULT
-                }
-            end
-        end
-    end
-}
-
-----------------------------------------------
--- Chicken Bone Joker
-----------------------------------------------
-SMODS.Joker{
-    key = 'chicken_bone',
-    loc_txt = {
-        name = 'Chicken Bone',
-        text = {
-            "{C:chips}+1{} Chip",
-            "{C:inactive}(Can only be obtained",
-            "{C:inactive}through Fried Chicken)"
-        }
-    },
-    config = { extra = { chips = 1 } },
-    rarity = 1,
-    cost = 1,
-    unlocked = true,
-    discovered = true,
-    blueprint_compat = true,
-    calculate = function(self, card, context)
-        if context.joker_main then
-            return {
-                chips = card.ability.extra.chips,
-                card = card
-            }
-        end
-    end
-}
 
 ----------------------------------------------
 -- Tripwire Joker
@@ -1273,10 +1270,9 @@ SMODS.Joker{
     loc_txt = {
         name = 'Tripwire',
         text = {
-            "Played cards with {V:1}#1#{} suit",
-            "give {X:mult,C:white}X2{} Mult",
-            "Played cards with {V:2}#2#{} suit",
-            "give {X:mult,C:white}X0.5{} Mult"
+            "Played cards with {V:1}#1#{} suit give {X:mult,C:white}X2{} Mult",
+            "Played cards with {V:2}#2#{} suit give {X:mult,C:white}X0.5{} Mult",
+            "the two suits cannot be the same"
         }
     },
     config = { extra = {} },
